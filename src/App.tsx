@@ -1,9 +1,12 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Camera, Download, Square, Smartphone, Coffee } from 'lucide-react';
 import html2canvas from 'html2canvas';
 import { GradientSelector } from './components/GradientSelector';
 import { AvailabilityInput } from './components/AvailabilityInput';
 import { ImageCropper } from './components/ImageCropper';
+import { Login } from './components/Login';
+import { CardHistory } from './components/CardHistory';
+import { supabase } from './lib/supabaseClient';
 
 interface FormData {
   name: string;
@@ -11,6 +14,11 @@ interface FormData {
   location: string;
   availabilityDates: string[];
   photo: string;
+}
+
+interface User {
+  email: string;
+  id: string;
 }
 
 function App() {
@@ -28,6 +36,43 @@ function App() {
   const [showCropper, setShowCropper] = useState(false);
   const [tempPhoto, setTempPhoto] = useState('');
   const cardRef = useRef<HTMLDivElement>(null);
+  const [user, setUser] = useState<any>(null);
+  const [cardHistory, setCardHistory] = useState<Array<{ id: string; imageUrl: string; createdAt: string }>>([]);
+
+  useEffect(() => {
+    // Check active session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+      if (session?.user) {
+        fetchCardHistory(session.user.id);
+      }
+    });
+
+    // Listen for auth changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+      if (session?.user) {
+        fetchCardHistory(session.user.id);
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const fetchCardHistory = async (userId: string) => {
+    const { data, error } = await supabase
+      .from('cards')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('Error fetching card history:', error);
+      return;
+    }
+
+    setCardHistory(data);
+  };
 
   const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -46,8 +91,28 @@ function App() {
     setShowCropper(false);
   };
 
+  const handleLogin = async (email: string, password: string) => {
+    try {
+      const mockUser = { email, id: '123' };
+      setUser(mockUser);
+      
+      setCardHistory([
+        {
+          id: '1',
+          imageUrl: 'path/to/image1.png',
+          createdAt: new Date().toISOString(),
+        },
+      ]);
+    } catch (error) {
+      console.error('Login failed:', error);
+      alert('Login failed. Please try again.');
+    }
+  };
+
   const handleExport = async () => {
-    if (cardRef.current) {
+    if (!cardRef.current || !user) return;
+
+    try {
       const scale = window.devicePixelRatio * 2;
       const canvas = await html2canvas(cardRef.current, {
         scale: scale,
@@ -83,7 +148,43 @@ function App() {
         link.href = tempCanvas.toDataURL('image/png', 1.0);
         link.click();
       }
+
+      // Upload to Supabase Storage
+      const file = await fetch(link.href).then(res => res.blob());
+      const fileName = `card-${Date.now()}.png`;
+      const filePath = `${user.id}/${fileName}`;
+
+      const { error: uploadError, data } = await supabase.storage
+        .from('cards')
+        .upload(filePath, file);
+
+      if (uploadError) throw uploadError;
+
+      // Get public URL
+      const { data: { publicUrl } } = supabase.storage
+        .from('cards')
+        .getPublicUrl(filePath);
+
+      // Save to database
+      const { error: dbError } = await supabase
+        .from('cards')
+        .insert({
+          user_id: user.id,
+          image_url: publicUrl,
+        });
+
+      if (dbError) throw dbError;
+
+      // Refresh card history
+      fetchCardHistory(user.id);
+    } catch (error) {
+      console.error('Export failed:', error);
+      alert('Failed to export card. Please try again.');
     }
+  };
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
   };
 
   const getBackgroundStyle = () => {
@@ -102,9 +203,21 @@ function App() {
     };
   };
 
+  if (!user) {
+    return <Login onLogin={handleLogin} />;
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-indigo-100 to-purple-100 p-4 sm:p-6">
       <div className="max-w-2xl mx-auto">
+        <div className="flex justify-end mb-4">
+          <button
+            onClick={handleLogout}
+            className="bg-gray-200 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-300 transition-colors"
+          >
+            Logout
+          </button>
+        </div>
         <div className="bg-white rounded-2xl shadow-xl p-6 sm:p-8 mb-8">
           <div className="flex justify-between items-center mb-6">
             <h1 className="text-3xl font-bold text-gray-800">Availability Card Generator</h1>
@@ -275,6 +388,8 @@ function App() {
             <span>Export Image</span>
           </button>
         </div>
+
+        <CardHistory cards={cardHistory} />
       </div>
 
       {showCropper && (
